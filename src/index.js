@@ -1,8 +1,9 @@
+
 const fs = require("fs/promises");
 const path = require("path");
 
 const { discoverBooks } = require("./catalogue");
-const { scrapeBook } = require("./details");
+const { scrapeBook, PageFetchError } = require("./details");
 const { normalizePrice } = require("./normalize");
 const { BookSchema } = require("./schema");
 
@@ -19,15 +20,22 @@ async function saveJson(filename, data) {
 }
 
 async function main() {
+    const runStartedAt = new Date();
+    const startTime = Date.now();
+
     await fs.mkdir(OUTPUT_DIR, { recursive: true });
 
     const books = await discoverBooks();
 
-    console.log("\nStarting detail-page scraping...");
-    console.log(`Books to process: ${books.length}`);
-
     const validRecords = [];
     const invalidRecords = [];
+    const failedPages = [];
+
+    let cacheHits = 0;
+    let pagesFetched = 0;
+
+    console.log("\nStarting detail-page scraping...");
+    console.log(`Books to process: ${books.length}`);
 
     for (let i = 0; i < books.length; i++) {
         const book = books[i];
@@ -35,67 +43,98 @@ async function main() {
         console.log(`\nProcessing book ${i + 1}/${books.length}`);
 
         try {
-            // Step 1: Scrape the raw book details.
-            const rawRecord = await scrapeBook(book);
+            const result = await scrapeBook(book);
 
-            // Step 2: Convert the price text into a number.
-            const priceGbp = normalizePrice(rawRecord.price_text);
+            if (result.cacheHit) {
+                cacheHits++;
+            } else {
+                pagesFetched++;
+            }
 
-            // Step 3: Add the normalized price to the raw record.
+            const rawRecord = result.record;
+
             const normalizedRecord = {
                 ...rawRecord,
-                price_gbp: priceGbp
+                price_gbp: normalizePrice(rawRecord.price_text)
             };
 
-            // Step 4: Validate the complete record using Zod.
-            const result = BookSchema.safeParse(normalizedRecord);
+            const validation = BookSchema.safeParse(normalizedRecord);
 
-            if (result.success) {
-                validRecords.push(result.data);
-                console.log("VALID:", normalizedRecord.title);
-            } else {
+            if (!validation.success) {
                 invalidRecords.push({
                     product_url: rawRecord.product_url,
                     title: rawRecord.title,
-                    reason: result.error.issues.map(issue => ({
+                    reason: validation.error.issues.map(issue => ({
                         field: issue.path.join("."),
                         message: issue.message
                     }))
                 });
 
                 console.log("INVALID:", rawRecord.title);
+                continue;
             }
-        } catch (error) {
-            invalidRecords.push({
-                product_url: book.url,
-                reason: error.message
-            });
 
-            console.log("ERROR:", error.message);
+            validRecords.push(validation.data);
+            console.log("VALID:", rawRecord.title);
+
+        } catch (error) {
+            const failure = {
+                product_url: book.url,
+                title: book.title || null,
+                reason: error.message
+            };
+
+            invalidRecords.push(failure);
+
+            if (error instanceof PageFetchError) {
+                failedPages.push({
+                    url: error.productUrl,
+                    status: error.status,
+                    reason: error.message
+                });
+            }
+
+            console.log("FAILED:", error.message);
         }
     }
 
-    // Save valid and invalid records separately.
     await saveJson("books.json", validRecords);
     await saveJson("errors.json", invalidRecords);
 
-    console.log("\nStage 4 Summary");
+    const durationMs = Date.now() - startTime;
+
+    const runReport = {
+        started_at: runStartedAt.toISOString(),
+        completed_at: new Date().toISOString(),
+        duration_ms: durationMs,
+        catalogue_pages: 3,
+        discovered_books: books.length,
+        pages_fetched: pagesFetched,
+        cache_hits: cacheHits,
+        valid_records: validRecords.length,
+        invalid_records: invalidRecords.length,
+        failed_pages: failedPages
+    };
+
+    await saveJson("run-report.json", runReport);
+
+    console.log("\nStage 5 Run Summary");
     console.log("-----------------------");
     console.log(`Discovered books: ${books.length}`);
+    console.log(`Pages fetched: ${pagesFetched}`);
+    console.log(`Cache hits: ${cacheHits}`);
     console.log(`Valid records: ${validRecords.length}`);
     console.log(`Invalid records: ${invalidRecords.length}`);
+    console.log(`Failed pages: ${failedPages.length}`);
+    console.log(`Duration: ${durationMs} ms`);
 
     console.log("\nOutput files:");
     console.log("output/books.json");
     console.log("output/errors.json");
-
-    if (validRecords.length > 0) {
-        console.log("\nFirst Valid Book Record:");
-        console.log(JSON.stringify(validRecords[0], null, 2));
-    }
+    console.log("output/run-report.json");
 }
 
-main().catch((error) => {
+main().catch(error => {
     console.error("\nScraper failed:", error.message);
     process.exitCode = 1;
 });

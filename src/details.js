@@ -1,3 +1,4 @@
+
 const fs = require("fs/promises");
 const path = require("path");
 const cheerio = require("cheerio");
@@ -9,14 +10,24 @@ const USER_AGENT =
 
 const REQUEST_DELAY_MS = 500;
 const REQUEST_TIMEOUT_MS = 10000;
+const MAX_RETRIES = 1;
 
 let lastNetworkRequestAt = null;
+
+// Custom error containing the failed URL and HTTP status.
+class PageFetchError extends Error {
+    constructor(message, productUrl, status = null, retryable = false) {
+        super(message);
+        this.name = "PageFetchError";
+        this.productUrl = productUrl;
+        this.status = status;
+        this.retryable = retryable;
+    }
+}
 
 function getCacheFile(productUrl) {
     const pathname = new URL(productUrl).pathname;
     const parts = pathname.split("/").filter(Boolean);
-
-    // The second-last URL segment identifies the book.
     const slug = parts[parts.length - 2];
 
     if (!slug) {
@@ -32,37 +43,20 @@ async function waitForPoliteInterval() {
         const remaining = REQUEST_DELAY_MS - elapsed;
 
         if (remaining > 0) {
-            await new Promise((resolve) =>
-                setTimeout(resolve, remaining)
-            );
+            await new Promise(resolve => setTimeout(resolve, remaining));
         }
     }
 
     lastNetworkRequestAt = Date.now();
 }
 
-async function loadBookPage(productUrl) {
-    await fs.mkdir(CACHE_DIR, { recursive: true });
-
-    const cacheFile = getCacheFile(productUrl);
-
-    // Reuse previously downloaded detail-page HTML.
-    try {
-        const html = await fs.readFile(cacheFile, "utf8");
-
-        console.log(`CACHE HIT: ${path.basename(cacheFile)}`);
-        return html;
-    } catch (error) {
-        if (error.code !== "ENOENT") {
-            throw error;
-        }
-    }
-
+async function fetchBookPage(productUrl) {
     await waitForPoliteInterval();
 
     console.log(`FETCH: ${productUrl}`);
 
     const controller = new AbortController();
+
     const timeout = setTimeout(
         () => controller.abort(),
         REQUEST_TIMEOUT_MS
@@ -79,18 +73,90 @@ async function loadBookPage(productUrl) {
         });
 
         if (response.status !== 200) {
-            throw new Error(
-                `HTTP ${response.status} while fetching ${productUrl}`
+            const retryable = response.status >= 500 && response.status <= 599;
+
+            throw new PageFetchError(
+                `HTTP ${response.status} while fetching ${productUrl}`,
+                productUrl,
+                response.status,
+                retryable
             );
         }
 
-        const html = await response.text();
+        return await response.text();
 
-        await fs.writeFile(cacheFile, html, "utf8");
+    } catch (error) {
+        if (error instanceof PageFetchError) {
+            throw error;
+        }
 
-        return html;
+        const timedOut = error.name === "AbortError";
+
+        throw new PageFetchError(
+            timedOut
+                ? `Request timed out: ${productUrl}`
+                : `Network error: ${error.message}`,
+            productUrl,
+            null,
+            true
+        );
+
     } finally {
         clearTimeout(timeout);
+    }
+}
+
+async function loadBookPage(productUrl) {
+    await fs.mkdir(CACHE_DIR, { recursive: true });
+
+    const cacheFile = getCacheFile(productUrl);
+
+    // Use cached HTML when available.
+    try {
+        const html = await fs.readFile(cacheFile, "utf8");
+
+        console.log(`CACHE HIT: ${path.basename(cacheFile)}`);
+
+        return {
+            html,
+            cacheHit: true
+        };
+
+    } catch (error) {
+        if (error.code !== "ENOENT") {
+            throw error;
+        }
+    }
+
+    // Attempt the request, with one retry for eligible failures.
+    for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+        try {
+            const html = await fetchBookPage(productUrl);
+
+            await fs.writeFile(cacheFile, html, "utf8");
+
+            console.log(`Cached at: ${cacheFile}`);
+
+            return {
+                html,
+                cacheHit: false
+            };
+
+        } catch (error) {
+            if (!(error instanceof PageFetchError)) {
+                throw error;
+            }
+
+            const canRetry = error.retryable && attempt < MAX_RETRIES;
+
+            if (!canRetry) {
+                throw error;
+            }
+
+            console.log(
+                `RETRY: Attempt ${attempt + 2} for ${productUrl}`
+            );
+        }
     }
 }
 
@@ -108,9 +174,10 @@ function extractBookDetails(html, productUrl, sourcePage) {
         .trim();
 
     const ratingClass = $(".star-rating").attr("class") || "";
+
     const ratingText = ratingClass
         .split(/\s+/)
-        .find((className) => className !== "star-rating") || null;
+        .find(className => className !== "star-rating") || null;
 
     const descriptionElement = $("#product_description").next("p");
 
@@ -131,13 +198,21 @@ function extractBookDetails(html, productUrl, sourcePage) {
 }
 
 async function scrapeBook(book) {
-    const html = await loadBookPage(book.url);
+    const result = await loadBookPage(book.url);
 
-    return extractBookDetails(
-        html,
+    const record = extractBookDetails(
+        result.html,
         book.url,
         book.source_page
     );
+
+    return {
+        record,
+        cacheHit: result.cacheHit
+    };
 }
 
-module.exports = { scrapeBook };
+module.exports = {
+    scrapeBook,
+    PageFetchError
+};
