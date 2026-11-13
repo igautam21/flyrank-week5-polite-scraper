@@ -1,0 +1,22 @@
+
+{
+  "name": "flyrank-week5-scraper",
+  "version": "1.0.0",
+  "description": "A polite web scraper for Books to Scrape - FlyRank Week 5",
+  "main": "src/index.js",
+  "scripts": {
+    "start": "node src/index.js"
+  },
+  "keywords": [
+    "web-scraping",
+    "cheerio",
+    "zod",
+    "flyrank"
+  ],
+  "author": "Gautam",
+  "license": "ISC",
+  "dependencies": {
+    "cheerio": "^1.2.0",
+    "zod": "^4.0.0"
+  }
+}
