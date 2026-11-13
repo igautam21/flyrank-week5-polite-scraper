@@ -1,3 +1,4 @@
+
 const fs = require("fs/promises");
 const path = require("path");
 const cheerio = require("cheerio");
@@ -11,7 +12,6 @@ const USER_AGENT =
 const REQUEST_DELAY_MS = 500;
 const REQUEST_TIMEOUT_MS = 10000;
 
-// Tracks when the previous real network request started.
 let lastNetworkRequestAt = null;
 
 function getCacheFile(pageNumber) {
@@ -21,7 +21,6 @@ function getCacheFile(pageNumber) {
     );
 }
 
-// Wait at least 500 ms between real network requests.
 async function waitForPoliteInterval() {
     if (lastNetworkRequestAt !== null) {
         const elapsed = Date.now() - lastNetworkRequestAt;
@@ -42,7 +41,7 @@ async function loadCataloguePage(pageNumber, pageUrl) {
 
     const cacheFile = getCacheFile(pageNumber);
 
-    // Use cached HTML whenever it is available.
+    // Use cached HTML if available.
     try {
         const html = await fs.readFile(cacheFile, "utf8");
 
@@ -58,12 +57,12 @@ async function loadCataloguePage(pageNumber, pageUrl) {
         }
     }
 
-    // Only real network requests need the polite delay.
     await waitForPoliteInterval();
 
     console.log(`FETCH: page ${pageNumber}`);
 
     const controller = new AbortController();
+
     const timeout = setTimeout(
         () => controller.abort(),
         REQUEST_TIMEOUT_MS
@@ -92,6 +91,7 @@ async function loadCataloguePage(pageNumber, pageUrl) {
         console.log(
             `Response size: ${Buffer.byteLength(html)} bytes`
         );
+
         console.log(`Cached at: ${cacheFile}`);
 
         return html;
@@ -103,11 +103,12 @@ async function loadCataloguePage(pageNumber, pageUrl) {
 async function discoverBooks() {
     let currentUrl = BASE_URL;
 
-    const allBookUrls = new Set();
+    const allBookUrls = new Map();
 
     let cataloguePages = 0;
     let discoveredCount = 0;
 
+    // Only scrape the first three catalogue pages.
     while (currentUrl && cataloguePages < 3) {
         cataloguePages++;
 
@@ -118,7 +119,7 @@ async function discoverBooks() {
 
         const $ = cheerio.load(html);
 
-        // Count every book link and store its absolute URL.
+        // Extract book URLs and remember their source page.
         $("article.product_pod h3 a").each((_, element) => {
             const href = $(element).attr("href");
 
@@ -130,11 +131,17 @@ async function discoverBooks() {
                     currentUrl
                 ).href;
 
-                allBookUrls.add(absoluteUrl);
+                // Avoid duplicate URLs.
+                if (!allBookUrls.has(absoluteUrl)) {
+                    allBookUrls.set(absoluteUrl, {
+                        url: absoluteUrl,
+                        source_page: cataloguePages
+                    });
+                }
             }
         });
 
-        // Follow the catalogue's own Next link.
+        // Follow the website's own Next link.
         const nextHref = $("li.next a").attr("href");
 
         currentUrl = nextHref
@@ -142,15 +149,15 @@ async function discoverBooks() {
             : null;
     }
 
-    const uniqueUrls = [...allBookUrls];
+    const uniqueBooks = [...allBookUrls.values()];
 
     console.log("\nDiscovery Summary");
     console.log("-----------------");
     console.log(`catalogue_pages=${cataloguePages}`);
     console.log(`discovered=${discoveredCount}`);
-    console.log(`unique_urls=${uniqueUrls.length}`);
+    console.log(`unique_urls=${uniqueBooks.length}`);
 
-    return uniqueUrls;
+    return uniqueBooks;
 }
 
 module.exports = { discoverBooks };
