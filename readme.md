@@ -83,7 +83,7 @@ scraper/
 ### Clone the repository
 
 ```bash
-git clone <YOUR_GITHUB_REPOSITORY_URL>
+git clone https://github.com/igautam21/flyrank-week5-polite-scraper.git
 cd scraper
 ```
 
